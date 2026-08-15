@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -64,14 +65,11 @@ func rawClient(t *testing.T, fw *cf.CaerusFramework) valkey.Client {
 	return vk.(*cf_valkey.CFValkey).Client()
 }
 
-// flushDB wipes the test server so repeated runs are idempotent (popped-but-
-// unacked payloads from a previous run would otherwise leak into assertions).
-func flushDB(t *testing.T, fw *cf.CaerusFramework) {
+// keyPrefix isolates this test on a shared Valkey. go test ./... runs the
+// delayed and vpq packages in parallel; FLUSHDB would wipe the other package.
+func keyPrefix(t *testing.T) string {
 	t.Helper()
-	raw := rawClient(t, fw)
-	if err := raw.Do(context.Background(), raw.B().Flushdb().Build()).Error(); err != nil {
-		t.Fatalf("Flushdb: %v", err)
-	}
+	return "vpq-" + strings.ReplaceAll(t.Name(), "/", "_") + ":"
 }
 
 func TestIntegrationAdded(t *testing.T) {
@@ -85,13 +83,12 @@ func TestIntegrationAdded(t *testing.T) {
 		t.Fatal("Init without a valkey component should fail")
 	}
 	fw := newFramework(t)
-	addComponent(t, fw, cf_valkey.New(cf_valkey.WithAddress(addr), cf_valkey.WithKeyPrefix("test:")))
+	addComponent(t, fw, cf_valkey.New(cf_valkey.WithAddress(addr), cf_valkey.WithKeyPrefix(keyPrefix(t))))
 	addComponent(t, fw, q)
 	if err := fw.Initialize(context.Background()); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
 	t.Cleanup(func() { _ = fw.Shutdown(context.Background()) })
-	flushDB(t, fw)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -123,13 +120,12 @@ func TestIntegrationGhostHandling(t *testing.T) {
 	}
 
 	fw := newFramework(t)
-	vk := cf_valkey.New(cf_valkey.WithAddress(addr), cf_valkey.WithKeyPrefix("test:"))
+	vk := cf_valkey.New(cf_valkey.WithAddress(addr), cf_valkey.WithKeyPrefix(keyPrefix(t)))
 	addComponent(t, fw, vk)
 	if err := fw.Initialize(context.Background()); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
 	t.Cleanup(func() { _ = fw.Shutdown(context.Background()) })
-	flushDB(t, fw)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
@@ -191,12 +187,11 @@ func TestIntegrationAtomicClaimKeepsInFlightOnPop(t *testing.T) {
 	}
 
 	fw := newFramework(t)
-	addComponent(t, fw, cf_valkey.New(cf_valkey.WithAddress(addr), cf_valkey.WithKeyPrefix("test:")))
+	addComponent(t, fw, cf_valkey.New(cf_valkey.WithAddress(addr), cf_valkey.WithKeyPrefix(keyPrefix(t))))
 	if err := fw.Initialize(context.Background()); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
 	t.Cleanup(func() { _ = fw.Shutdown(context.Background()) })
-	flushDB(t, fw)
 
 	ctx := context.Background()
 	q := New(WithQueueName("atomic"))
@@ -230,13 +225,12 @@ func TestIntegrationDeadlockRecovery(t *testing.T) {
 	}
 
 	fw := newFramework(t)
-	vk := cf_valkey.New(cf_valkey.WithAddress(addr), cf_valkey.WithKeyPrefix("test:"))
+	vk := cf_valkey.New(cf_valkey.WithAddress(addr), cf_valkey.WithKeyPrefix(keyPrefix(t)))
 	addComponent(t, fw, vk)
 	if err := fw.Initialize(context.Background()); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
 	t.Cleanup(func() { _ = fw.Shutdown(context.Background()) })
-	flushDB(t, fw)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
@@ -298,12 +292,11 @@ func TestIntegrationRecoverLoop(t *testing.T) {
 	}
 
 	fw := newFramework(t)
-	addComponent(t, fw, cf_valkey.New(cf_valkey.WithAddress(addr), cf_valkey.WithKeyPrefix("test:")))
+	addComponent(t, fw, cf_valkey.New(cf_valkey.WithAddress(addr), cf_valkey.WithKeyPrefix(keyPrefix(t))))
 	if err := fw.Initialize(context.Background()); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
 	t.Cleanup(func() { _ = fw.Shutdown(context.Background()) })
-	flushDB(t, fw)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -351,12 +344,11 @@ func TestIntegrationHealthThresholds(t *testing.T) {
 	}
 
 	fw := newFramework(t)
-	addComponent(t, fw, cf_valkey.New(cf_valkey.WithAddress(addr), cf_valkey.WithKeyPrefix("test:")))
+	addComponent(t, fw, cf_valkey.New(cf_valkey.WithAddress(addr), cf_valkey.WithKeyPrefix(keyPrefix(t))))
 	if err := fw.Initialize(context.Background()); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
 	t.Cleanup(func() { _ = fw.Shutdown(context.Background()) })
-	flushDB(t, fw)
 
 	ctx := context.Background()
 	q := New(WithQueueName("hthr"), WithMaxDepth(1))
@@ -403,7 +395,7 @@ func TestIntegration(t *testing.T) {
 
 	fw := newFramework(t)
 
-	vk := cf_valkey.New(cf_valkey.WithAddress(addr), cf_valkey.WithKeyPrefix("test:"))
+	vk := cf_valkey.New(cf_valkey.WithAddress(addr), cf_valkey.WithKeyPrefix(keyPrefix(t)))
 	q := New(WithQueueName("itest"))
 	addComponent(t, fw, vk)
 	addComponent(t, fw, q)
@@ -412,7 +404,6 @@ func TestIntegration(t *testing.T) {
 		t.Fatalf("Init: %v", err)
 	}
 	t.Cleanup(func() { _ = fw.Shutdown(context.Background()) })
-	flushDB(t, fw)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -479,7 +470,7 @@ func TestIntegrationConsume(t *testing.T) {
 
 	fw := newFramework(t)
 
-	vk := cf_valkey.New(cf_valkey.WithAddress(addr), cf_valkey.WithKeyPrefix("test:"))
+	vk := cf_valkey.New(cf_valkey.WithAddress(addr), cf_valkey.WithKeyPrefix(keyPrefix(t)))
 	processed := make(chan string, 10)
 	q := New(
 		WithQueueName("ctest"),
@@ -494,7 +485,6 @@ func TestIntegrationConsume(t *testing.T) {
 		t.Fatalf("Init: %v", err)
 	}
 	t.Cleanup(func() { _ = fw.Shutdown(context.Background()) })
-	flushDB(t, fw)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -605,14 +595,13 @@ func TestIntegrationLoggerRedelivery(t *testing.T) {
 	if !ok {
 		t.Fatal("logs component not found")
 	}
-	addComponent(t, fw, cf_valkey.New(cf_valkey.WithAddress(addr), cf_valkey.WithKeyPrefix("test:")))
+	addComponent(t, fw, cf_valkey.New(cf_valkey.WithAddress(addr), cf_valkey.WithKeyPrefix(keyPrefix(t))))
 	q := New(WithQueueName("lgr"))
 	addComponent(t, fw, q)
 	if err := fw.Initialize(context.Background()); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
 	t.Cleanup(func() { _ = fw.Shutdown(context.Background()) })
-	flushDB(t, fw)
 
 	before := q.logger
 	if before == nil || q.logsSub == nil {
@@ -641,7 +630,7 @@ func TestIntegrationHealthReflectsConnectivity(t *testing.T) {
 	}
 
 	fw := newFramework(t)
-	addComponent(t, fw, cf_valkey.New(cf_valkey.WithAddress(addr), cf_valkey.WithKeyPrefix("test:")))
+	addComponent(t, fw, cf_valkey.New(cf_valkey.WithAddress(addr), cf_valkey.WithKeyPrefix(keyPrefix(t))))
 	q := New(WithQueueName("hlt"))
 	addComponent(t, fw, q)
 	if err := fw.Initialize(context.Background()); err != nil {
@@ -683,7 +672,7 @@ func TestIntegrationMultipleNamedInstances(t *testing.T) {
 	}
 
 	fw := newFramework(t)
-	addComponent(t, fw, cf_valkey.New(cf_valkey.WithAddress(addr), cf_valkey.WithKeyPrefix("test:")))
+	addComponent(t, fw, cf_valkey.New(cf_valkey.WithAddress(addr), cf_valkey.WithKeyPrefix(keyPrefix(t))))
 
 	email := New(WithQueueName("email"), WithName("email-queue"))
 	billing := New(WithQueueName("billing"), WithName("billing-queue"))
@@ -695,7 +684,6 @@ func TestIntegrationMultipleNamedInstances(t *testing.T) {
 		t.Fatalf("Init: %v", err)
 	}
 	t.Cleanup(func() { _ = fw.Shutdown(context.Background()) })
-	flushDB(t, fw)
 
 	// Get by name retrieves the correct instance
 	emailGot, ok := cf.GetByName[*PriorityQueue](fw, "email-queue")
@@ -764,7 +752,7 @@ func TestIntegrationConfigReload(t *testing.T) {
 	fw := newFramework(t)
 	conf := cf_configuration.New()
 	addComponent(t, fw, conf)
-	vk := cf_valkey.New(cf_valkey.WithConfigSource("valkey", ""), cf_valkey.WithKeyPrefix("test:"))
+	vk := cf_valkey.New(cf_valkey.WithConfigSource("valkey", ""), cf_valkey.WithKeyPrefix(keyPrefix(t)))
 	addComponent(t, fw, vk)
 	q := New(WithQueueName("reload-test"))
 	addComponent(t, fw, q)
@@ -774,7 +762,6 @@ func TestIntegrationConfigReload(t *testing.T) {
 		t.Fatalf("Init: %v", err)
 	}
 	t.Cleanup(func() { _ = fw.Shutdown(context.Background()) })
-	flushDB(t, fw)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

@@ -13,8 +13,8 @@ River/asynq wrap (`caerus-framework-jobs` when a product needs that).
 
 | Package | Machine |
 |---|---|
-| [`vpq`](vpq/) | Weighted priority queue (hottest id wins). **Shipped.** |
-| `delayed/` | Delayed / retry / dead-letter jobs (fold of `caerus-framework-valkey-jobs`). **Not in this tag.** |
+| [`vpq`](vpq/) | Weighted priority queue (hottest id wins) |
+| [`delayed`](delayed/) | Delayed / retry / dead-letter jobs (fold of `caerus-framework-valkey-jobs`). Do not tag that old module anymore |
 
 There is no parent component that always starts every machine. The **app**
 constructs the queue it needs in `New` and returns it from `Subcomponents()`.
@@ -34,7 +34,41 @@ Keys go through the valkey peer’s `Key()` (`squeue`, `zqueue`, `pqdeadlocks`,
 shutdown. A failed handler requeues (weight +1).
 
 Not a general job queue (no DLQ/cron/dashboard). For retries and scheduling
-use the later `delayed` package or River/asynq — not this machine.
+use the **`delayed`** package in this module, or River/asynq — not VPQ.
+
+## `delayed` — run-at / retry / dead letter
+
+Same fridge and chassis as VPQ. Different Lua: ready / inflight / dead ZSETs.
+`Handler` is `func(context.Context, Job) error`. Keys go through valkey
+`Key("jobs", …)`. Construct in the app’s `New` and return from
+`Subcomponents()` when the product enqueues; do not start it because VPQ
+exists.
+
+```go
+jobs := delayed.New(
+	delayed.WithConfigSource("jobs", "config/jobs.json"),
+	delayed.WithJobHandler("email.send", sendEmail),
+)
+```
+
+`WithConfigSource` Init used to deadlock (mutex locked twice). That is fixed;
+the regression is `TestWithConfigSourceInitializeDoesNotDeadlock`.
+
+`worker_enabled` and `retry_jitter` are pointers in the file: omit keeps the
+construct default; explicit `false` / `0` is how you turn the worker off or
+disable jitter. The poll loop reads `worker_enabled` every tick.
+
+Default **visibility** is 1 minute. Set `WithVisibility` (per enqueue) well
+above the handler’s runtime or a slow job is reaped as hung and retried.
+Do not Info-log `job.Payload` if it can hold PII.
+
+Dead letters sit in a ZSET until retention expires. Operators call
+`ListDead`, `Replay` (same id, attempts reset, due now), `PurgeDead`, or
+`PurgeDeadAll`. There is no HTTP admin; an app job or CLI is enough.
+Ack/release use the valkey peer’s live `Client()` (not the claim-time
+snapshot).
+
+Depth gauges: `valkey_jobs_ready`, `valkey_jobs_inflight`, `valkey_jobs_dead`.
 
 ## Wiring
 
