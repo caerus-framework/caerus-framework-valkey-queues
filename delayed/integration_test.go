@@ -3,6 +3,7 @@ package delayed
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -26,7 +27,8 @@ func addComponent(t *testing.T, fw *cf.CaerusFramework, c cf.CaerusComponent) {
 }
 
 // setupJobs boots a framework with a real valkey (VALKEY_ADDR), the jobs
-// component, and a running worker. It flushes the server, and returns the jobs
+// component, and a running worker. Each test gets its own key prefix so
+// parallel packages (vpq) on the same server cannot wipe this one.
 // component, a raw client for assertions, and a cancel that stops the worker
 // (which drains claimed jobs before Run returns).
 func setupJobs(t *testing.T, opts ...Option) (*CFValkeyJobs, valkey.Client, context.CancelFunc) {
@@ -45,7 +47,9 @@ func setupJobsNamed(t *testing.T, valkeyName string, opts ...Option) (*CFValkeyJ
 	vk := cf_valkey.New(
 		cf_valkey.WithName(valkeyName),
 		cf_valkey.WithAddress(addr),
-		cf_valkey.WithKeyPrefix("valkey-jobs-test"),
+		// Unique prefix: go test ./... runs delayed and vpq in parallel on
+		// one Valkey. FLUSHDB would wipe the other package mid-test.
+		cf_valkey.WithKeyPrefix(fmt.Sprintf("jobs-%s:", strings.ReplaceAll(t.Name(), "/", "_"))),
 	)
 	addComponent(t, fw, vk)
 	jobs := New(opts...)
@@ -54,8 +58,8 @@ func setupJobsNamed(t *testing.T, valkeyName string, opts ...Option) (*CFValkeyJ
 		t.Fatalf("Initialize: %v", err)
 	}
 	raw := vk.Client()
-	if err := raw.Do(context.Background(), raw.B().Flushdb().Build()).Error(); err != nil {
-		t.Fatalf("Flushdb: %v", err)
+	if raw == nil {
+		t.Fatal("valkey Client() is nil after Initialize")
 	}
 
 	runCtx, cancel := context.WithCancel(context.Background())

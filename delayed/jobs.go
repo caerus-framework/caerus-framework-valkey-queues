@@ -659,27 +659,25 @@ func (c *CFValkeyJobs) ListDead(ctx context.Context, offset, limit int64) ([]Job
 	if limit <= 0 || limit > listDeadCap {
 		limit = listDeadCap
 	}
-	stop := offset + limit - 1
-	resp := client.Do(ctx, client.B().Zrange().Key(c.deadKey()).
-		Min(strconv.FormatInt(offset, 10)).Max(strconv.FormatInt(stop, 10)).
-		Withscores().Build())
+	resp := client.Do(ctx, client.B().Zrangebyscore().Key(c.deadKey()).
+		Min("-inf").Max("+inf").
+		Withscores().
+		Limit(offset, limit).
+		Build())
 	if resp.Error() != nil {
 		return nil, resp.Error()
 	}
-	pairs, err := resp.AsStrSlice()
+	zs, err := resp.AsZScores()
 	if err != nil {
 		return nil, err
 	}
-	out := make([]Job, 0, len(pairs)/2)
-	for i := 0; i+1 < len(pairs); i += 2 {
-		id := pairs[i]
-		job, err := c.loadJob(ctx, client, id)
+	out := make([]Job, 0, len(zs))
+	for _, z := range zs {
+		job, err := c.loadJob(ctx, client, z.Member)
 		if err != nil {
-			continue
+			job = Job{ID: z.Member}
 		}
-		if ms, perr := strconv.ParseInt(pairs[i+1], 10, 64); perr == nil {
-			job.DeadAt = time.UnixMilli(ms)
-		}
+		job.DeadAt = time.UnixMilli(int64(z.Score))
 		out = append(out, job)
 	}
 	return out, nil
@@ -759,7 +757,8 @@ func (c *CFValkeyJobs) PurgeDeadAll(ctx context.Context) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	resp := client.Do(ctx, client.B().Zrange().Key(c.deadKey()).Min("0").Max("-1").Build())
+	resp := client.Do(ctx, client.B().Zrangebyscore().Key(c.deadKey()).
+		Min("-inf").Max("+inf").Build())
 	if resp.Error() != nil {
 		return 0, resp.Error()
 	}
