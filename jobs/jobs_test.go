@@ -1,4 +1,4 @@
-package delayed
+package jobs
 
 import (
 	"context"
@@ -346,5 +346,12 @@ func TestDeadLetterOpsBeforeInit(t *testing.T) {
 	}
 	if err := j.Replay(ctx, ""); err == nil {
 		t.Fatal("Replay empty id should fail")
+	}
+}
+
+func TestWithRepeatClampsBelowOneSecond(t *testing.T) {
+	j := New(WithRepeat("t", 50*time.Millisecond, nil))
+	if len(j.repeats) != 1 || j.repeats[0].every != time.Second {
+		t.Fatalf("repeats = %+v, want every=1s", j.repeats)
 	}
 }

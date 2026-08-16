@@ -8,16 +8,21 @@ Caerus Framework **Valkey queue machines**. One module, several claim/ack
 components that share a valkey peer (`Client()` per use, `Key()` for names,
 logs, soft-init). The fridge is [`caerus-framework-valkey`](https://github.com/caerus-framework/caerus-framework-valkey).
 
-This is **not** valkey-state (sessions / cache / counters). It is **not** a
-River/asynq wrap (`caerus-framework-jobs` when a product needs that).
+This is **not** valkey-state (sessions / cache / counters). Queues and
+state are siblings that both use the valkey peer; neither owns the other.
+It is **not** a River/asynq wrap (`caerus-framework-jobs` when a product
+needs that).
 
 | Package | Machine |
 |---|---|
 | [`vpq`](vpq/) | Weighted priority queue (hottest id wins) |
-| [`delayed`](delayed/) | Delayed / retry / dead-letter jobs (fold of `caerus-framework-valkey-jobs`). Do not tag that old module anymore |
+| [`jobs`](jobs/) | Delayed / retry / dead-letter jobs (`ComponentName` `"valkey-jobs"`). Old repo `caerus-framework-valkey-jobs` is not tagged anymore |
+| this module (`queues`) | Optional **parent** `CFValkeyQueues`: groups machines you pass in. Not a shared `Queue` type. Omitting a machine means it does not start |
 
-There is no parent component that always starts every machine. The **app**
-constructs the queue it needs in `New` and returns it from `Subcomponents()`.
+The **app** still constructs the queue it needs in `New` and returns it from
+`Subcomponents()` (demoapp: VPQ only). Use the parent when a binary wants
+one `AddComponent` for several machines. There is no default that starts
+every machine.
 
 ---
 
@@ -34,20 +39,25 @@ Keys go through the valkey peer’s `Key()` (`squeue`, `zqueue`, `pqdeadlocks`,
 shutdown. A failed handler requeues (weight +1).
 
 Not a general job queue (no DLQ/cron/dashboard). For retries and scheduling
-use the **`delayed`** package in this module, or River/asynq — not VPQ.
+use the **`jobs`** package in this module, or River/asynq — not VPQ.
 
-## `delayed` — run-at / retry / dead letter
+## `jobs` — run-at / retry / dead letter
 
-Same fridge and chassis as VPQ. Different Lua: ready / inflight / dead ZSETs.
+Same fridge and chassis as VPQ. This is still **valkey-jobs**: delayed
+work, retries, dead letter. The **module** is `valkey-queues`; the **package
+and registry name** stay jobs (`import …/valkey-queues/jobs`, `Name()`
+`"valkey-jobs"`). Different Lua: ready / inflight / dead ZSETs.
 `Handler` is `func(context.Context, Job) error`. Keys go through valkey
 `Key("jobs", …)`. Construct in the app’s `New` and return from
 `Subcomponents()` when the product enqueues; do not start it because VPQ
 exists.
 
 ```go
-jobs := delayed.New(
-	delayed.WithConfigSource("jobs", "config/jobs.json"),
-	delayed.WithJobHandler("email.send", sendEmail),
+import cf_jobs "github.com/caerus-framework/caerus-framework-valkey-queues/jobs"
+
+q := cf_jobs.New(
+	cf_jobs.WithConfigSource("jobs", "config/jobs.json"),
+	cf_jobs.WithJobHandler("email.send", sendEmail),
 )
 ```
 
@@ -69,6 +79,13 @@ Ack/release use the valkey peer’s live `Client()` (not the claim-time
 snapshot).
 
 Depth gauges: `valkey_jobs_ready`, `valkey_jobs_inflight`, `valkey_jobs_dead`.
+
+Delivery stays **at-least-once**. `WithID` makes enqueue unique while the job
+hash exists (`ErrAlreadyEnqueued`); a visibility timeout can still run the
+handler twice. `WithRepeat(type, every, payload)` is interval cron, not a
+calendar: one fire per interval across replicas (valkey NX lock). Missed
+ticks are not replayed. There is no jobs **dashboard** (no HTML UI); use
+`/metrics`, `ListDead`, and logs.
 
 ## Wiring
 
@@ -137,6 +154,29 @@ fw.AddComponent(queue) // GetDependencies: valkey, logs
 The queue is a `cf.Runnable`: with a handler, `Run` consumes until cancel.
 Default recover of abandoned in-flight items is 30s (`WithRecoverInterval(0)`
 to disable).
+
+### Optional parent (`CFValkeyQueues`)
+
+This is **not** a single `Queue` API. VPQ and jobs stay separate types.
+The parent is a bag: pass only the machines this process should run.
+
+```go
+import (
+	cf_jobs "github.com/caerus-framework/caerus-framework-valkey-queues/jobs"
+	cf_queues "github.com/caerus-framework/caerus-framework-valkey-queues"
+	"github.com/caerus-framework/caerus-framework-valkey-queues/vpq"
+)
+
+bag := cf_queues.New(
+	cf_queues.WithVPQ(vpq.New(vpq.WithQueueName("orders"), vpq.WithHandler(handleOrder))),
+	cf_queues.WithJobs(cf_jobs.New(cf_jobs.WithJobHandler("email.send", sendEmail))),
+)
+fw.AddComponent(bag) // registers bag, then each child
+```
+
+`WithJobs` omitted → jobs is not registered. Same for `WithVPQ`. Children
+keep `Name()` `"vpq"` / `"valkey-jobs"` (or their `WithName`). The parent
+does not Init, Run, or Shutdown them.
 
 ## Usage
 

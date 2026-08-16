@@ -1,4 +1,4 @@
-package delayed
+package jobs
 
 import (
 	"context"
