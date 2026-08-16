@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -251,6 +252,31 @@ func TestRetryPolicyJitterRange(t *testing.T) {
 		if delay < 5*time.Second || delay > 15*time.Second {
 			t.Fatalf("jittered delay = %v, want within [5s, 15s] (10s base, 0.5 jitter)", delay)
 		}
+	}
+}
+
+func TestValidateJobID(t *testing.T) {
+	ok, err := newID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{ok, "stable-id-1"} {
+		if err := validateJobID(id); err != nil {
+			t.Fatalf("validateJobID(%q) = %v", id, err)
+		}
+	}
+	for _, id := range []string{"", "ready", "inflight", "dead", "cron", "a:b", "jobs:ready"} {
+		if err := validateJobID(id); !errors.Is(err, ErrInvalidJobID) {
+			t.Fatalf("validateJobID(%q) = %v, want ErrInvalidJobID", id, err)
+		}
+	}
+}
+
+func TestEnqueueRejectsReservedID(t *testing.T) {
+	j := New()
+	_, err := j.Enqueue(context.Background(), "t", nil, WithID("ready"))
+	if !errors.Is(err, ErrInvalidJobID) {
+		t.Fatalf("Enqueue WithID ready = %v, want ErrInvalidJobID", err)
 	}
 }
 

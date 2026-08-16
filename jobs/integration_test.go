@@ -361,6 +361,35 @@ func TestIntegrationRepeat(t *testing.T) {
 	waitFor(t, 4*time.Second, func() bool { return runs.Load() >= 2 })
 }
 
+func TestIntegrationRepeatDoesNotFlood(t *testing.T) {
+	jobs, raw, _ := setupJobs(t,
+		WithPollInterval(40*time.Millisecond),
+		WithWorkerEnabled(false),
+		WithRepeat("tick", 2*time.Second, []byte("r")),
+	)
+	waitFor(t, 2*time.Second, func() bool {
+		n, err := raw.Do(context.Background(), raw.B().Zcard().Key(jobs.readyKey()).Build()).AsInt64()
+		return err == nil && n >= 1
+	})
+	time.Sleep(250 * time.Millisecond)
+	n, err := raw.Do(context.Background(), raw.B().Zcard().Key(jobs.readyKey()).Build()).AsInt64()
+	if err != nil {
+		t.Fatalf("ZCARD ready: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("ready depth = %d, want 1 (NX must skip extra polls)", n)
+	}
+}
+
+func TestIntegrationEnqueueReservedID(t *testing.T) {
+	jobs, _, _ := setupJobs(t, WithJobHandler("t", func(context.Context, Job) error { return nil }))
+	for _, id := range []string{"ready", "inflight", "dead", "cron", "a:b"} {
+		if _, err := jobs.Enqueue(context.Background(), "t", []byte("x"), WithID(id)); !errors.Is(err, ErrInvalidJobID) {
+			t.Fatalf("WithID(%q) = %v, want ErrInvalidJobID", id, err)
+		}
+	}
+}
+
 func TestIntegrationDeadLetterListReplayPurge(t *testing.T) {
 	var runs atomic.Int64
 	jobs, raw, _ := setupJobs(t,

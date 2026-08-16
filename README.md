@@ -36,7 +36,9 @@ Keys go through the valkey peer’s `Key()` (`squeue`, `zqueue`, `pqdeadlocks`,
 …). Put the instance prefix on **valkey** (`WithKeyPrefix`), not on VPQ.
 
 `Handler` is `func(context.Context, *BGetObject) error`. Honour `ctx` for
-shutdown. A failed handler requeues (weight +1).
+shutdown. A failed handler requeues (weight +1). Recover of a hung claim
+can give the same id to another worker (**at-least-once**). The handler
+must be safe to run twice.
 
 Not a general job queue (no DLQ/cron/dashboard). For retries and scheduling
 use the **`jobs`** package in this module, or River/asynq — not VPQ.
@@ -82,10 +84,38 @@ Depth gauges: `valkey_jobs_ready`, `valkey_jobs_inflight`, `valkey_jobs_dead`.
 
 Delivery stays **at-least-once**. `WithID` makes enqueue unique while the job
 hash exists (`ErrAlreadyEnqueued`); a visibility timeout can still run the
-handler twice. `WithRepeat(type, every, payload)` is interval cron, not a
-calendar: one fire per interval across replicas (valkey NX lock). Missed
-ticks are not replayed. There is no jobs **dashboard** (no HTML UI); use
-`/metrics`, `ListDead`, and logs.
+handler twice. The id is one segment: no `:`, and not `ready` / `inflight` /
+`dead` / `cron` (`ErrInvalidJobID`) — those names are the ZSETs and the
+repeat lock prefix. `WithRepeat(type, every, payload)` is interval cron, not a
+calendar: one fire per interval across replicas (enqueue only when the
+Valkey SET NX lock is acquired). Missed ticks are not replayed. There is no
+jobs **dashboard** (no HTML UI); use `/metrics`, `ListDead`, and logs.
+
+## Contracts (how this is supposed to work)
+
+These are **not** holes to close in a later tag.
+
+**Lua is KEYS + ARGV, not a string-built script.** Claim/ack/enqueue
+scripts are constants (or `NewLuaScript`). Job id, payload, and scores
+are passed as KEYS (which keys) and ARGV (values). Redis does not run
+ARGV as Lua. Do not `fmt.Sprintf` an id into the script text.
+
+**This module logs job id and type, not payload.** Reap, dead-letter,
+ack, and requeue lines use `job` / `type`. Payload can be PII. An app
+handler may log its own fields; default component logs will not grow
+`job.Payload`.
+
+**`ListDead` / `Replay` / `PurgeDead` are in-process Go.** There is no
+`/jobs/dead` route and no extra listen port. Whoever can call `Replay`
+already holds `*CFValkeyJobs` (CLI, app job, test). Auth for an operator
+tool belongs in **that** binary. Do not add BasicAuth inside `jobs.go`.
+If a product wants a UI, the **app** owns the route and the auth.
+
+**VPQ claim is at-least-once, same idea as jobs visibility.** One Lua
+script pops, tracks deadlock, and reads payload so a crash cannot drop
+the member between those steps. If recover runs while a handler is
+still working, another worker can see the same id. That is duplicate
+delivery, not a racy claim to rewrite. Keep handlers idempotent.
 
 ## Wiring
 

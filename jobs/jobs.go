@@ -107,6 +107,9 @@ var (
 	// ErrAlreadyEnqueued means WithID named a job that still exists (ready,
 	// inflight, or dead hash). After ack the id may be reused.
 	ErrAlreadyEnqueued = errors.New("cf_valkey_jobs: job id already exists")
+	// ErrInvalidJobID means WithID used a reserved name (ready, inflight,
+	// dead, cron) or contained ":", which would collide with index keys.
+	ErrInvalidJobID = errors.New("cf_valkey_jobs: invalid job id")
 )
 
 // Option configures the component at construction time.
@@ -334,6 +337,9 @@ func WithRunAt(t time.Time) EnqueueOption {
 // same id while the hash still exists returns ErrAlreadyEnqueued (at-most-one
 // copy in the queue). This is not exactly-once *execution*: a handler may
 // still run more than once if visibility expires. Empty id is ignored.
+// Ids must be a single path segment: no ":", and not ready / inflight /
+// dead / cron (those are the index keys). Invalid ids return ErrInvalidJobID
+// before any Valkey write.
 func WithID(id string) EnqueueOption {
 	return func(o *enqueueOptions) { o.id = id }
 }
@@ -624,10 +630,6 @@ func (c *CFValkeyJobs) client() (valkey.Client, error) {
 // Enqueue stores a job with a JSON-ish opaque payload. The job type names the
 // handler that must be registered on a worker. Returns the job id.
 func (c *CFValkeyJobs) Enqueue(ctx context.Context, jobType string, payload []byte, opts ...EnqueueOption) (string, error) {
-	client, err := c.client()
-	if err != nil {
-		return "", err
-	}
 	if jobType == "" {
 		return "", errors.New("cf_valkey_jobs: Enqueue: empty job type")
 	}
@@ -662,6 +664,13 @@ func (c *CFValkeyJobs) Enqueue(ctx context.Context, jobType string, payload []by
 		if err != nil {
 			return "", err
 		}
+	}
+	if err := validateJobID(id); err != nil {
+		return "", err
+	}
+	client, err := c.client()
+	if err != nil {
+		return "", err
 	}
 	resp := client.Do(ctx, client.B().Eval().Script(luaEnqueue).
 		Numkeys(2).
@@ -920,7 +929,12 @@ func (c *CFValkeyJobs) tickRepeats(ctx context.Context) {
 		}
 		lock := c.jobsKey("cron", r.jobType)
 		resp := client.Do(ctx, client.B().Set().Key(lock).Value("1").Nx().PxMilliseconds(px).Build())
-		if resp.Error() != nil {
+		ok, err := nxAcquired(resp)
+		if err != nil {
+			c.logger.Warn("cf_valkey_jobs: repeat lock failed", "type", r.jobType, "err", err)
+			continue
+		}
+		if !ok {
 			continue
 		}
 		if _, err := c.Enqueue(ctx, r.jobType, r.payload); err != nil {
@@ -1497,6 +1511,39 @@ func parseClaim(fields []string) (Job, int64, int64, error) {
 		MaxAttempts: maxA,
 		CreatedAt:   time.UnixMilli(createdMs),
 	}, retryStart, jitterBase, nil
+}
+
+// validateJobID rejects ids that share a Redis key with the ready / inflight /
+// dead ZSETs or the WithRepeat lock prefix (jobs:cron:…). Colon is refused so
+// a caller cannot walk into those names as extra Key() segments.
+func validateJobID(id string) error {
+	if id == "" || strings.Contains(id, ":") {
+		return ErrInvalidJobID
+	}
+	switch id {
+	case zReady, zInflight, zDead, "cron":
+		return ErrInvalidJobID
+	}
+	return nil
+}
+
+// nxAcquired is true only when SET NX created the key. A lost NX is a nil
+// bulk (valkey.Nil), not a transport error — enqueue must not run then.
+func nxAcquired(resp valkey.ValkeyResult) (bool, error) {
+	if err := resp.Error(); err != nil {
+		if errors.Is(err, valkey.Nil) {
+			return false, nil
+		}
+		return false, err
+	}
+	s, err := resp.ToString()
+	if err != nil {
+		if errors.Is(err, valkey.Nil) {
+			return false, nil
+		}
+		return false, err
+	}
+	return s == "OK", nil
 }
 
 // newID returns a 128-bit random hex id.
