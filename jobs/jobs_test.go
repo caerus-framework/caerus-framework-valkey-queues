@@ -1,7 +1,8 @@
-package delayed
+package jobs
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -254,6 +255,31 @@ func TestRetryPolicyJitterRange(t *testing.T) {
 	}
 }
 
+func TestValidateJobID(t *testing.T) {
+	ok, err := newID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{ok, "stable-id-1"} {
+		if err := validateJobID(id); err != nil {
+			t.Fatalf("validateJobID(%q) = %v", id, err)
+		}
+	}
+	for _, id := range []string{"", "ready", "inflight", "dead", "cron", "a:b", "jobs:ready"} {
+		if err := validateJobID(id); !errors.Is(err, ErrInvalidJobID) {
+			t.Fatalf("validateJobID(%q) = %v, want ErrInvalidJobID", id, err)
+		}
+	}
+}
+
+func TestEnqueueRejectsReservedID(t *testing.T) {
+	j := New()
+	_, err := j.Enqueue(context.Background(), "t", nil, WithID("ready"))
+	if !errors.Is(err, ErrInvalidJobID) {
+		t.Fatalf("Enqueue WithID ready = %v, want ErrInvalidJobID", err)
+	}
+}
+
 func TestNewID(t *testing.T) {
 	a, err := newID()
 	if err != nil {
@@ -346,5 +372,12 @@ func TestDeadLetterOpsBeforeInit(t *testing.T) {
 	}
 	if err := j.Replay(ctx, ""); err == nil {
 		t.Fatal("Replay empty id should fail")
+	}
+}
+
+func TestWithRepeatClampsBelowOneSecond(t *testing.T) {
+	j := New(WithRepeat("t", 50*time.Millisecond, nil))
+	if len(j.repeats) != 1 || j.repeats[0].every != time.Second {
+		t.Fatalf("repeats = %+v, want every=1s", j.repeats)
 	}
 }

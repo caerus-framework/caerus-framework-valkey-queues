@@ -1,4 +1,4 @@
-package delayed
+package jobs
 
 import (
 	"context"
@@ -47,7 +47,7 @@ func setupJobsNamed(t *testing.T, valkeyName string, opts ...Option) (*CFValkeyJ
 	vk := cf_valkey.New(
 		cf_valkey.WithName(valkeyName),
 		cf_valkey.WithAddress(addr),
-		// Unique prefix: go test ./... runs delayed and vpq in parallel on
+		// Unique prefix: go test ./... runs jobs and vpq in parallel on
 		// one Valkey. FLUSHDB would wipe the other package mid-test.
 		cf_valkey.WithKeyPrefix(fmt.Sprintf("jobs-%s:", strings.ReplaceAll(t.Name(), "/", "_"))),
 	)
@@ -328,6 +328,65 @@ func TestIntegrationEnqueueErrors(t *testing.T) {
 	jobs, _, _ := setupJobs(t, WithPollInterval(30*time.Millisecond))
 	if _, err := jobs.Enqueue(context.Background(), "", nil); err == nil {
 		t.Fatal("empty type should error")
+	}
+}
+
+func TestIntegrationEnqueueWithID(t *testing.T) {
+	jobs, _, _ := setupJobs(t,
+		WithPollInterval(30*time.Millisecond),
+		WithJobHandler("id", func(ctx context.Context, job Job) error {
+			time.Sleep(200 * time.Millisecond)
+			return nil
+		}),
+	)
+	const id = "stable-id-1"
+	if _, err := jobs.Enqueue(context.Background(), "id", []byte("a"), WithID(id)); err != nil {
+		t.Fatalf("first Enqueue: %v", err)
+	}
+	if _, err := jobs.Enqueue(context.Background(), "id", []byte("b"), WithID(id)); !errors.Is(err, ErrAlreadyEnqueued) {
+		t.Fatalf("second Enqueue = %v, want ErrAlreadyEnqueued", err)
+	}
+}
+
+func TestIntegrationRepeat(t *testing.T) {
+	var runs atomic.Int64
+	_, _, _ = setupJobs(t,
+		WithPollInterval(50*time.Millisecond),
+		WithRepeat("tick", time.Second, []byte("r")),
+		WithJobHandler("tick", func(ctx context.Context, job Job) error {
+			runs.Add(1)
+			return nil
+		}),
+	)
+	waitFor(t, 4*time.Second, func() bool { return runs.Load() >= 2 })
+}
+
+func TestIntegrationRepeatDoesNotFlood(t *testing.T) {
+	jobs, raw, _ := setupJobs(t,
+		WithPollInterval(40*time.Millisecond),
+		WithWorkerEnabled(false),
+		WithRepeat("tick", 2*time.Second, []byte("r")),
+	)
+	waitFor(t, 2*time.Second, func() bool {
+		n, err := raw.Do(context.Background(), raw.B().Zcard().Key(jobs.readyKey()).Build()).AsInt64()
+		return err == nil && n >= 1
+	})
+	time.Sleep(250 * time.Millisecond)
+	n, err := raw.Do(context.Background(), raw.B().Zcard().Key(jobs.readyKey()).Build()).AsInt64()
+	if err != nil {
+		t.Fatalf("ZCARD ready: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("ready depth = %d, want 1 (NX must skip extra polls)", n)
+	}
+}
+
+func TestIntegrationEnqueueReservedID(t *testing.T) {
+	jobs, _, _ := setupJobs(t, WithJobHandler("t", func(context.Context, Job) error { return nil }))
+	for _, id := range []string{"ready", "inflight", "dead", "cron", "a:b"} {
+		if _, err := jobs.Enqueue(context.Background(), "t", []byte("x"), WithID(id)); !errors.Is(err, ErrInvalidJobID) {
+			t.Fatalf("WithID(%q) = %v, want ErrInvalidJobID", id, err)
+		}
 	}
 }
 

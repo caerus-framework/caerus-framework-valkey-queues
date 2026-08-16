@@ -66,7 +66,7 @@ func rawClient(t *testing.T, fw *cf.CaerusFramework) valkey.Client {
 }
 
 // keyPrefix isolates this test on a shared Valkey. go test ./... runs the
-// delayed and vpq packages in parallel; FLUSHDB would wipe the other package.
+// jobs and vpq packages in parallel; FLUSHDB would wipe the other package.
 func keyPrefix(t *testing.T) string {
 	t.Helper()
 	return "vpq-" + strings.ReplaceAll(t.Name(), "/", "_") + ":"
