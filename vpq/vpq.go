@@ -667,14 +667,14 @@ func (q *PriorityQueue) applyConfigSourceLocked(identity bool) error {
 		cfg.PollInterval = 1
 	}
 	if identity {
-		overlayConfig(&cfg, *loaded)
+		overlayConfig(&cfg, loaded)
 	} else {
 		queueName := q.cfg.QueueName
-		overlayConfig(&cfg, *loaded)
+		overlayConfig(&cfg, loaded)
 		cfg.QueueName = queueName
 	}
 	q.cfg = cfg
-	q.applyRecoverHealthFromConfig(*loaded)
+	q.applyRecoverHealthFromConfig(loaded)
 	return nil
 }
 
