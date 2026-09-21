@@ -43,6 +43,17 @@ func TestHealthAndMetricsBeforeInit(t *testing.T) {
 	var _ cf_observability.MetricsProvider = j
 }
 
+func metricNamed(t *testing.T, ms []cf_observability.Metric, name string) float64 {
+	t.Helper()
+	for _, m := range ms {
+		if m.Name == name {
+			return m.Value
+		}
+	}
+	t.Fatalf("missing metric %s in %+v", name, ms)
+	return 0
+}
+
 func TestNewDefaults(t *testing.T) {
 	j := New()
 	if j.pollInterval != defaultPollInterval {
@@ -150,6 +161,13 @@ func TestInitAllowsNilClient(t *testing.T) {
 	}
 	if err := j.Health(context.Background()); err == nil {
 		t.Fatal("Health with nil Client() should fail")
+	}
+	ms := j.Metrics()
+	if ms == nil {
+		t.Fatal("Metrics after soft Init should scream disconnected, not be nil")
+	}
+	if got := metricNamed(t, ms, "valkey_jobs_disconnected"); got != 1 {
+		t.Fatalf("valkey_jobs_disconnected = %v, want 1", got)
 	}
 }
 

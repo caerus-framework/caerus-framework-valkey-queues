@@ -861,23 +861,41 @@ func (q *PriorityQueue) Health(ctx context.Context) error {
 	return nil
 }
 
-// Metrics implements cf_observability.MetricsProvider. While initialized it
-// reports info, depth, in-flight, and cumulative recoveries; before Init or
-// after Shutdown it returns nil (observability lazy pickup).
+// Metrics implements cf_observability.MetricsProvider. After Init it always
+// reports info plus vpq_disconnected (1 when the valkey Client() is nil —
+// degraded peer; Health stays not-ready). Depth / in-flight need a live
+// client and are omitted while disconnected. Before Init or after Shutdown
+// it returns nil (observability lazy pickup).
 func (q *PriorityQueue) Metrics() []cf_observability.Metric {
-	if q.getClient() == nil {
-		return nil
-	}
 	q.mu.RLock()
+	vk := q.valkey
 	queue := q.cfg.QueueName
 	q.mu.RUnlock()
+	if vk == nil {
+		return nil
+	}
+	disconnected := 0.0
+	if vk.Client() == nil {
+		disconnected = 1
+	}
 	labels := chassis.CopyLabels(map[string]string{"queue": queue, "component": q.Name()})
-	ms := []cf_observability.Metric{{
-		Name:   "vpq_info",
-		Help:   "Valkey priority queue state.",
-		Value:  1,
-		Labels: chassis.CopyLabels(labels),
-	}}
+	ms := []cf_observability.Metric{
+		{
+			Name:   "vpq_info",
+			Help:   "Valkey priority queue state; 1 while Init completed.",
+			Value:  1,
+			Labels: chassis.CopyLabels(labels),
+		},
+		{
+			Name:   "vpq_disconnected",
+			Help:   "1 when Init completed but valkey Client() is nil (degraded peer). Health is not-ready.",
+			Value:  disconnected,
+			Labels: chassis.CopyLabels(labels),
+		},
+	}
+	if vk.Client() == nil {
+		return ms
+	}
 	mctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if depth, err := q.Count(mctx); err == nil {

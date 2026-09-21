@@ -149,6 +149,9 @@ func TestIntegrationEnqueueAndRun(t *testing.T) {
 	if ms := jobs.Metrics(); metricValue(ms, "valkey_jobs_enqueued_total") != 3 || metricValue(ms, "valkey_jobs_run_total") != 3 {
 		t.Fatalf("metrics mismatch: %+v", ms)
 	}
+	if metricValue(jobs.Metrics(), "valkey_jobs_disconnected") != 0 {
+		t.Fatalf("valkey_jobs_disconnected while connected = %v, want 0", metricValue(jobs.Metrics(), "valkey_jobs_disconnected"))
+	}
 	if err := jobs.Health(context.Background()); err != nil {
 		t.Fatalf("Health after run: %v", err)
 	}

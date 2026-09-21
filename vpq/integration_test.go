@@ -644,13 +644,16 @@ func TestIntegrationHealthReflectsConnectivity(t *testing.T) {
 	for _, m := range ms {
 		byName[m.Name] = m
 	}
-	for _, name := range []string{"vpq_info", "vpq_depth", "vpq_in_flight", "vpq_recoveries_total"} {
+	for _, name := range []string{"vpq_info", "vpq_disconnected", "vpq_depth", "vpq_in_flight", "vpq_recoveries_total"} {
 		if _, ok := byName[name]; !ok {
 			t.Fatalf("Metrics while connected = %+v, missing %q", ms, name)
 		}
 	}
 	if byName["vpq_info"].Value != 1 {
 		t.Fatalf("vpq_info = %v, want 1", byName["vpq_info"].Value)
+	}
+	if byName["vpq_disconnected"].Value != 0 {
+		t.Fatalf("vpq_disconnected = %v, want 0 while connected", byName["vpq_disconnected"].Value)
 	}
 	if err := q.Shutdown(context.Background()); err != nil {
 		t.Fatalf("Shutdown: %v", err)
