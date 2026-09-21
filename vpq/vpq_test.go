@@ -54,6 +54,38 @@ func TestHealthBeforeInit(t *testing.T) {
 	var _ cf.ConfigReloader = q
 }
 
+func TestInitAllowsNilClient(t *testing.T) {
+	fw := cf.New()
+	if err := fw.AddComponent(cf_valkey.New()); err != nil {
+		t.Fatalf("AddComponent: %v", err)
+	}
+	q := New(WithQueueName("orders"))
+	if err := q.Init(context.Background(), fw); err != nil {
+		t.Fatalf("Init with nil Client() should soft-succeed: %v", err)
+	}
+	if err := q.Health(context.Background()); err == nil {
+		t.Fatal("Health with nil Client() should fail")
+	}
+	ms := q.Metrics()
+	if ms == nil {
+		t.Fatal("Metrics after soft Init should scream disconnected, not be nil")
+	}
+	if got := metricNamed(t, ms, "vpq_disconnected"); got != 1 {
+		t.Fatalf("vpq_disconnected = %v, want 1", got)
+	}
+}
+
+func metricNamed(t *testing.T, ms []cf_observability.Metric, name string) float64 {
+	t.Helper()
+	for _, m := range ms {
+		if m.Name == name {
+			return m.Value
+		}
+	}
+	t.Fatalf("missing metric %s in %+v", name, ms)
+	return 0
+}
+
 func TestWithName(t *testing.T) {
 	// Default name
 	q1 := New(WithQueueName("orders"))

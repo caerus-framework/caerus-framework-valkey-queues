@@ -368,11 +368,12 @@ func WithRetention(d time.Duration) EnqueueOption {
 	return func(o *enqueueOptions) { o.retention = d }
 }
 
-// CFValkeyJobs is the caerus-framework-valkey-jobs component: a lightweight
-// delayed task queue over a cf_valkey.CFValkey peer. It is a stateless
-// consumer of the peer (never a client snapshot) and builds every command
-// through the peer's live Client() and prefix-aware Key(), so reconnects and
-// key prefixes stay consistent.
+// CFValkeyJobs is the delayed / retry / dead-letter machine in
+// caerus-framework-valkey-queues (package jobs, Name() "valkey-jobs").
+// It is not River or asynq. It is a stateless consumer of a
+// cf_valkey.CFValkey peer (never a client snapshot) and builds every
+// command through the peer's live Client() and prefix-aware Key(), so
+// reconnects and key prefixes stay consistent.
 //
 // Delivery is at-least-once: a job runs, its handler either acknowledges it,
 // requeues it with a retry delay, or (attempts exhausted) dead-letters it. A
@@ -1395,51 +1396,68 @@ func (c *CFValkeyJobs) meter(jobType string) *typeMeter {
 	return m
 }
 
-// Metrics implements cf_observability.MetricsProvider. It reports operation
-// counters (per job type) while the peer's client is initialized; before Init
-// or after Shutdown it returns nil, so the observability component skips it
-// (lazy pickup). Counters are cumulative for the process lifetime.
+// Metrics implements cf_observability.MetricsProvider. After Init it always
+// reports info plus valkey_jobs_disconnected (1 when the valkey Client() is
+// nil — degraded peer; Health stays not-ready). Depth gauges and per-type
+// counters that need a live client are omitted while disconnected. Before
+// Init or after Shutdown it returns nil (lazy pickup).
 func (c *CFValkeyJobs) Metrics() []cf_observability.Metric {
-	if c.Client() == nil {
+	vk := c.peer()
+	if vk == nil {
 		return nil
+	}
+	disconnected := 0.0
+	if vk.Client() == nil {
+		disconnected = 1
 	}
 	labels := map[string]string{"component": c.Name()}
 	ms := []cf_observability.Metric{
 		{
 			Name:   "valkey_jobs_info",
-			Help:   "Valkey jobs component descriptor; 1 while initialized.",
+			Help:   "Valkey jobs component descriptor; 1 while Init completed.",
 			Value:  1,
 			Labels: chassis.CopyLabels(labels),
 		},
 		{
+			Name:   "valkey_jobs_disconnected",
+			Help:   "1 when Init completed but valkey Client() is nil (degraded peer). Health is not-ready.",
+			Value:  disconnected,
+			Labels: chassis.CopyLabels(labels),
+		},
+	}
+	if vk.Client() == nil {
+		return ms
+	}
+	ms = append(ms,
+		cf_observability.Metric{
 			Name:   "valkey_jobs_config_reloads_total",
 			Help:   "Total number of successful worker-tunable reloads.",
 			Value:  float64(c.reloads.Load()),
 			Labels: chassis.CopyLabels(labels),
 			Type:   cf_observability.MetricTypeCounter,
 		},
-		{
+		cf_observability.Metric{
 			Name:   "valkey_jobs_ready",
 			Help:   "Jobs waiting in the ready ZSET.",
 			Value:  c.zcard(c.readyKey()),
 			Labels: chassis.CopyLabels(labels),
 			Type:   cf_observability.MetricTypeGauge,
 		},
-		{
+		cf_observability.Metric{
 			Name:   "valkey_jobs_inflight",
 			Help:   "Jobs in the inflight ZSET.",
 			Value:  c.zcard(c.inflightKey()),
 			Labels: chassis.CopyLabels(labels),
 			Type:   cf_observability.MetricTypeGauge,
 		},
-		{
+		cf_observability.Metric{
 			Name:   "valkey_jobs_dead",
 			Help:   "Jobs in the dead-letter ZSET.",
 			Value:  c.zcard(c.deadKey()),
 			Labels: chassis.CopyLabels(labels),
 			Type:   cf_observability.MetricTypeGauge,
 		},
-	}
+	)
 
 	c.metersMu.Lock()
 	types := make([]string, 0, len(c.meters))

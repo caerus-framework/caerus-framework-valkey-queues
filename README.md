@@ -10,13 +10,14 @@ logs, soft-init). The fridge is [`caerus-framework-valkey`](https://github.com/c
 
 This is **not** valkey-state (sessions / cache / counters). Queues and
 state are siblings that both use the valkey peer; neither owns the other.
-It is **not** a River/asynq wrap (`caerus-framework-jobs` when a product
-needs that).
+It is **not** River or asynq. This module is Valkey claim/ack machines
+(`vpq` plus delayed **jobs**). The package and registry name for delayed
+work stay `jobs` / `"valkey-jobs"`.
 
 | Package | Machine |
 |---|---|
 | [`vpq`](vpq/) | Weighted priority queue (hottest id wins) |
-| [`jobs`](jobs/) | Delayed / retry / dead-letter jobs (`ComponentName` `"valkey-jobs"`). Old repo `caerus-framework-valkey-jobs` is not tagged anymore |
+| [`jobs`](jobs/) | Delayed / retry / dead-letter (`Name()` `"valkey-jobs"`) |
 | this module (`queues`) | Optional **parent** `CFValkeyQueues`: groups machines you pass in. Not a shared `Queue` type. Omitting a machine means it does not start |
 
 The **app** still constructs the queue it needs in `New` and returns it from
@@ -40,8 +41,17 @@ shutdown. A failed handler requeues (weight +1). Recover of a hung claim
 can give the same id to another worker (**at-least-once**). The handler
 must be safe to run twice.
 
+```text
+Wrong: Ack (or delete) the item, then do the side effect (charge, send
+       mail, write a row). A crash after Ack drops the work. “Delete on
+       error” so the queue looks clean silently drops it too.
+Right: do the side effect first, and make that effect **idempotent**;
+       then Ack. A second run after recover must be safe. This is
+       at-least-once delivery, not exactly-once.
+```
+
 Not a general job queue (no DLQ/cron/dashboard). For retries and scheduling
-use the **`jobs`** package in this module, or River/asynq — not VPQ.
+use the **`jobs`** package in this module. VPQ is not River.
 
 ## `jobs` — run-at / retry / dead letter
 
@@ -72,7 +82,11 @@ disable jitter. The poll loop reads `worker_enabled` every tick.
 
 Default **visibility** is 1 minute. Set `WithVisibility` (per enqueue) well
 above the handler’s runtime or a slow job is reaped as hung and retried.
-Do not Info-log `job.Payload` if it can hold PII.
+Payloads are opaque caller bytes: do **not** put raw tokens or passwords
+in them (Valkey dumps, replicas, and anyone with `DEBUG`/`SCAN` can read
+the fridge). Do not Info-log `job.Payload` if it can hold PII; this
+module logs job id and type only. Metrics cardinality is the other leak
+path — do not put unique secrets in job **type** labels either.
 
 Dead letters sit in a ZSET until retention expires. Operators call
 `ListDead`, `Replay` (same id, attempts reset, due now), `PurgeDead`, or
@@ -81,6 +95,8 @@ Ack/release use the valkey peer’s live `Client()` (not the claim-time
 snapshot).
 
 Depth gauges: `valkey_jobs_ready`, `valkey_jobs_inflight`, `valkey_jobs_dead`.
+Disconnected: `valkey_jobs_disconnected` (`1` when Init ran but `Client()` is
+nil — Health stays red).
 
 Delivery stays **at-least-once**. `WithID` makes enqueue unique while the job
 hash exists (`ErrAlreadyEnqueued`); a visibility timeout can still run the
@@ -101,9 +117,10 @@ are passed as KEYS (which keys) and ARGV (values). Redis does not run
 ARGV as Lua. Do not `fmt.Sprintf` an id into the script text.
 
 **This module logs job id and type, not payload.** Reap, dead-letter,
-ack, and requeue lines use `job` / `type`. Payload can be PII. An app
-handler may log its own fields; default component logs will not grow
-`job.Payload`.
+ack, and requeue lines use `job` / `type`. Payload can be PII. Do not
+put raw tokens or passwords in queue bodies; a Valkey dump is then a
+secret dump. An app handler may log its own fields; default component
+logs will not grow `job.Payload`.
 
 **`ListDead` / `Replay` / `PurgeDead` are in-process Go.** There is no
 `/jobs/dead` route and no extra listen port. Whoever can call `Replay`
@@ -247,10 +264,18 @@ reconnect is the valkey owner’s job.
 `Health` pings valkey and checks depth / in-flight. A nil `Client()`
 (before Init, after Shutdown, or degraded peer) is **not ready**. Init may
 succeed when the peer is degraded (`Client()` nil); `/readyz` stays red until
-the fridge answers.
+the fridge answers. Registration is not readiness.
 
-Metrics (`vpq_info`, `vpq_depth`, `vpq_in_flight`, `vpq_recoveries_total`)
-use copied label maps (`queue`, `component`).
+After Init, metrics still scrape while disconnected so dashboards can
+see the gap: `vpq_disconnected` / `valkey_jobs_disconnected` are `1`
+when `Client()` is nil (`0` when the peer answers). Depth / ZSET gauges
+are omitted until the client exists (they cannot be read). Before Init
+or after Shutdown, Metrics returns nil (lazy pickup).
+
+Connected samples: `vpq_info`, `vpq_disconnected`, `vpq_depth`,
+`vpq_in_flight`, `vpq_recoveries_total` (labels `queue`, `component`).
+Jobs: `valkey_jobs_info`, `valkey_jobs_disconnected`, plus the depth and
+per-type counters already listed above.
 
 ## Tests
 
